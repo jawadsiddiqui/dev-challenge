@@ -1,34 +1,34 @@
 package com.crewmeister.cmcodingchallenge.controller;
 
-import com.crewmeister.cmcodingchallenge.currency.CurrencyConversionRates;
-import com.crewmeister.cmcodingchallenge.dto.ExchangeRateResponse;
+import com.crewmeister.cmcodingchallenge.Constants;
+import com.crewmeister.cmcodingchallenge.dto.CurrencyConversionRates;
+import io.github.resilience4j.retry.annotation.Retry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Lazy;
-import org.springframework.http.*;
-import org.springframework.util.MultiValueMap;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.ArrayList;
-import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+
+import static com.crewmeister.cmcodingchallenge.utilities.Authenticate.addCustomAuthHeaders;
 
 @RestController()
 @RequestMapping("/api")
 public class CurrencyController {
 
+    Logger LOGGER = LoggerFactory.getLogger(CurrencyController.class);
+
     @Autowired
     @Lazy
     private RestTemplate restTemplate;
-
-    public static final String EXCHANGE_RATE_API_URL = "https://api.apilayer.com/exchangerates_data";
-
-    private static String apiKey = "sg1VdvNUP4EPHgF2HIsUUrOIFeqop4jS";
-
 
     /**
      * Get All currencies.
@@ -36,59 +36,91 @@ public class CurrencyController {
      * @return list of all currencies available
      */
     @GetMapping("/currencies")
-    public ResponseEntity<ArrayList<CurrencyConversionRates>> getCurrencies() {
-
-        String url = String.format(EXCHANGE_RATE_API_URL+"/symbols");
-
-        ArrayList<String> currencies = new ArrayList<String>();
+    @Async
+    @Retry(name = Constants.CURRENCY_SERVICE)
+    public ResponseEntity<String> getCurrencies(@RequestHeader Map<String, String> header) {
 
         RestTemplate restTemplate = new RestTemplate();
-        HttpHeaders headers = new HttpHeaders();
-        headers.add("apiKey", apiKey);
-        HttpEntity<ExchangeRateResponse> entity = new HttpEntity<>(headers);
 
 
-        ResponseEntity <ExchangeRateResponse> response = restTemplate.exchange(url,HttpMethod.GET, entity, ExchangeRateResponse.class);
+        ResponseEntity<String> response = (restTemplate.exchange(Constants.EXCHANGE_CURRENCIES_SYMBOLS_API,
+                HttpMethod.GET,
+                addCustomAuthHeaders(header),
+                String.class));
 
-        currencies.addAll(response.getBody().getRates().keySet());
-
-        return new ResponseEntity<ArrayList<CurrencyConversionRates>>((MultiValueMap<String, String>) currencies, HttpStatus.OK);
+        return  response;
     }
 
+
+    /**
+     * Get Historical rates.
+     *
+     * @param date   Provide date e.g. YYYY-MM-DD
+     * @param base   Provide base currency code e.g. EUR
+     * @param target Provide target currency code e.g. USD
+     * @return return @ExchangeRateResponse as body
+     */
     @GetMapping("/rates")
-    public ResponseEntity<ExchangeRateResponse> getRates(@RequestParam Date date, @RequestParam String base, @RequestParam String target) {
+    @Async
+    @Retry(name = Constants.CURRENCY_SERVICE, fallbackMethod = "fallbackResponse")
+    public ResponseEntity<CurrencyConversionRates> getRates(@RequestHeader Map<String, String> header,
+                                                            @RequestParam String date,
+                                                            @RequestParam String base,
+                                                            @RequestParam String target) {
 
-        String url = String.format(EXCHANGE_RATE_API_URL+"/%s?symbols=%s&base=%s", date , target, base);
-
-
+        String url = String.format(Constants.EXCHANGE_RATES_API, date, target, base);
         RestTemplate restTemplate = new RestTemplate();
-        ExchangeRateResponse exchangeRateResponse = restTemplate.getForObject(url, ExchangeRateResponse.class);
 
-        Double rate = exchangeRateResponse.getRates().get(target);
-        exchangeRateResponse.setBase(base);
-        exchangeRateResponse.getRates().clear();
-        exchangeRateResponse.getRates().put(target, rate);
+        CurrencyConversionRates currencyConversionRates
+                = restTemplate.exchange(url,
+                HttpMethod.GET,
+                addCustomAuthHeaders(header),
+                CurrencyConversionRates.class).getBody();
 
-        return new ResponseEntity<ExchangeRateResponse>(exchangeRateResponse, HttpStatus.OK);
+        return new ResponseEntity<CurrencyConversionRates>(currencyConversionRates, HttpStatus.OK);
     }
 
+    /**
+     * Conversion from one currency to others.
+     *
+     * @param amount Provide date e.g. YYYY-MM-DD
+     * @param from   Provide base currency code e.g. EUR
+     * @param to     Provide target currency code e.g. USD
+     * @return return @ExchangeRateResponse as body
+     */
     @GetMapping("/convert")
-    public ResponseEntity<Double> convert(@RequestParam Double amount, @RequestParam String from, @RequestParam String to, @RequestParam String date) {
-        String url = String.format(EXCHANGE_RATE_API_URL+"/convert?to=%s&from=%s&amount=%s", to, from, amount);
+    @Async
+    @Retry(name = Constants.CURRENCY_SERVICE, fallbackMethod = "fallbackResponse")
+    public ResponseEntity<CurrencyConversionRates> convert(@RequestHeader Map<String, String> header,
+                                                           @RequestParam Double amount,
+                                                           @RequestParam String from,
+                                                           @RequestParam String to) {
 
+        String url = String.format(Constants.EXCHANGE_CONVERT_API, to, from, amount);
         RestTemplate restTemplate = new RestTemplate();
-        ExchangeRateResponse exchangeRateResponse = restTemplate.getForObject(url, ExchangeRateResponse.class);
 
-        Double rate = exchangeRateResponse.getRates().get(to);
-        Double convertedAmount = amount * rate;
+        CurrencyConversionRates currencyConversionRates = new CurrencyConversionRates();
 
-        return new ResponseEntity<Double>(convertedAmount, HttpStatus.OK);
+        currencyConversionRates.setBase(from);
+
+        Map<String, Double> map = new HashMap<>();
+        map.put(to, (Double) restTemplate
+                .exchange(url, HttpMethod.GET, addCustomAuthHeaders(header), Map.class)
+                .getBody()
+                .get("result"));
+
+        currencyConversionRates.setRates(map);
+
+        return new ResponseEntity<CurrencyConversionRates>(currencyConversionRates, HttpStatus.OK);
+    }
+
+    public ResponseEntity<CurrencyConversionRates> fallbackResponse(Exception e) {
+        CurrencyConversionRates currencyConversionRates = new CurrencyConversionRates();
+        return new ResponseEntity<>(currencyConversionRates, HttpStatus.BAD_REQUEST);
     }
 
     @Bean
     public RestTemplate getRestTemplate() {
         return restTemplate;
     }
-
-    
 }

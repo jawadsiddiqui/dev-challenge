@@ -1,20 +1,20 @@
 management:
   health:
     circuitbreakers:
-      enable: true
-    endpoints:
-      web:
-        exposure:
-          include: health
-    endpoint:
-      health:
-        show-details: always
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: always
 
 
 resilience4j:
   circuitbreaker:
     instances:
-      userService:
+      currencyService:
         registerHealthIndicator: true
         eventConsumerBufferSize: 10
         failureRateThreshold: 50
@@ -26,9 +26,9 @@ resilience4j:
         slidingWindowType: COUNT_BASED
 
 
+
   retry:
     instances:
-      userService:
+      currencyService:
         maxRetryAttempts: 5
         waitDuration: 10s
-
